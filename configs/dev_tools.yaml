@@ -1,0 +1,28 @@
+domain: "dev_tools"
+products:
+  - "Postman"
+  - "Insomnia"
+  - "Hoppscotch"
+
+personas:
+  - id: backend_junior
+    role: "Junior Backend Engineer"
+    tone: "casual"
+    rating_range: [3, 5]
+
+  - id: backend_senior
+    role: "Senior Backend Engineer"
+    tone: "direct"
+    rating_range: [2, 5]
+
+  - id: qa_engineer
+    role: "QA Engineer"
+    tone: "detailed"
+    rating_range: [1, 4]
+
+rating_distribution:
+  5: 0.35
+  4: 0.40
+  3: 0.20
+  2: 0.04
+  1: 0.01

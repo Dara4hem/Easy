@@ -1,0 +1,5 @@
+# Python venv
+.venv/
+
+# Local environment secrets
+.env

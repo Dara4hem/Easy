@@ -1,17 +1,20 @@
 import json
 import random
+import time
 import uuid
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
+import typer
 
+import requests
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 from pydantic import BaseModel, Field
 
 from .config import Config, Persona
 
-# حمل المتغيرات من ملف .env
 load_dotenv()
+
 client = OpenAI()
 
 
@@ -36,7 +39,6 @@ class Review(BaseModel):
 
 
 def _sample_rating(rating_distribution: Dict[int, float]) -> int:
-    """اختر rating عشوائيًا طبقًا للتوزيع الموجود في الـ config."""
     ratings, probs = zip(*sorted(rating_distribution.items()))
     return random.choices(ratings, weights=probs, k=1)[0]
 
@@ -48,10 +50,7 @@ def _sample_persona(cfg: Config) -> Persona:
 # ---------- STUB GENERATION ----------
 
 def generate_review_stub(cfg: Config, source_model: str = "stub") -> Review:
-    """
-    مولّد مبدئي (بدون LLM) عشان نختبر البايبلاين.
-    لاحقًا هنستبدله بنداء للموديل.
-    """
+
     persona = _sample_persona(cfg)
     product = random.choice(cfg.products)
     rating = _sample_rating(cfg.rating_distribution)
@@ -73,14 +72,24 @@ def generate_review_stub(cfg: Config, source_model: str = "stub") -> Review:
     )
 
 
-def generate_many_stub(cfg: Config, n: int) -> List[Review]:
-    return [generate_review_stub(cfg) for _ in range(n)]
+def generate_many_stub(cfg: Config, n: int) -> Tuple[List[Review], float]:
+    """
+    Generate n stub reviews with a simple progress bar.
+    Returns (reviews, elapsed_seconds).
+    """
+    reviews: List[Review] = []
+    start_time = time.perf_counter()
+    with typer.progressbar(range(n), label=f"Stub ({n} reviews)") as progress:
+        for _ in progress:
+            reviews.append(generate_review_stub(cfg))
+    elapsed = time.perf_counter() - start_time
+    return reviews, elapsed
 
 
-# ---------- OPENAI GENERATION ----------
+
+# ---------- COMMON PROMPT ----------
 
 def _build_prompt(persona: Persona, product: str, rating: int) -> str:
-    # خلي بالك من الـ {{ و }} عشان f-string ما يعتبرهاش format
     return f"""
 You are generating a realistic user review for a dev tool.
 
@@ -93,7 +102,7 @@ Rating: {rating} / 5
 
 Requirements:
 - Mention at least one concrete use case or workflow (e.g. debugging APIs, running tests in CI).
-- Be consistent with the rating (low rating → more negatives, high rating → more positives).
+- Be consistent with the rating (low rating -> more negatives, high rating -> more positives).
 - Length: 60–120 words.
 - Avoid generic marketing buzzwords like "revolutionary" unless they sound natural.
 
@@ -105,6 +114,8 @@ Output ONLY valid JSON with this exact schema:
 """.strip()
 
 
+# ---------- OPENAI GENERATION ----------
+
 def generate_review_openai(cfg: Config, model: str = "gpt-4.1-mini") -> Review:
     persona = _sample_persona(cfg)
     product = random.choice(cfg.products)
@@ -112,23 +123,24 @@ def generate_review_openai(cfg: Config, model: str = "gpt-4.1-mini") -> Review:
 
     prompt = _build_prompt(persona, product, rating)
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {
-                "role": "system",
-                "content": "You generate realistic SaaS/dev-tools product reviews as structured JSON.",
-            },
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.9,
-    )
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You generate realistic SaaS/dev-tools product reviews as structured JSON.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.9,
+        )
+    except RateLimitError:
+        return generate_review_stub(cfg, source_model=f"openai:{model}:rate_limited")
 
     content = response.choices[0].message.content
 
-    # مكتبة openai الجديدة أحيانًا ترجع list من القطع
     if isinstance(content, list):
-        # لو رجعت structured parts
         text_parts = []
         for part in content:
             if hasattr(part, "text") and part.text is not None:
@@ -143,7 +155,6 @@ def generate_review_openai(cfg: Config, model: str = "gpt-4.1-mini") -> Review:
         title = data.get("title", f"Review for {product}")
         body = data.get("body", content)
     except json.JSONDecodeError:
-        # fallback: نحط النص كله في body
         title = f"Review for {product}"
         body = content
 
@@ -157,5 +168,211 @@ def generate_review_openai(cfg: Config, model: str = "gpt-4.1-mini") -> Review:
     )
 
 
-def generate_many_openai(cfg: Config, n: int, model: str = "gpt-4.1-mini") -> List[Review]:
-    return [generate_review_openai(cfg, model=model) for _ in range(n)]
+def generate_many_openai(
+    cfg: Config,
+    n: int,
+    model: str = "gpt-4.1-mini",
+) -> Tuple[List[Review], float]:
+    """
+    Generate n reviews using OpenAI, with a progress bar.
+    Returns (reviews, elapsed_seconds).
+    """
+    reviews: List[Review] = []
+    label = f"OpenAI ({model})"
+    start_time = time.perf_counter()
+    with typer.progressbar(range(n), label=label) as progress:
+        for _ in progress:
+            reviews.append(generate_review_openai(cfg, model=model))
+    elapsed = time.perf_counter() - start_time
+    return reviews, elapsed
+
+
+
+# ---------- OLLAMA (QWEN3-30B) GENERATION ----------
+
+def generate_review_ollama(
+    cfg: Config,
+    model: str = "hf.co/unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF:Q3_K_S",
+) -> Review:
+    """
+    Generate a review using local Ollama model (Qwen3-30B UnsLo th GGUF).
+    """
+    persona = _sample_persona(cfg)
+    product = random.choice(cfg.products)
+    rating = _sample_rating(cfg.rating_distribution)
+
+    prompt = _build_prompt(persona, product, rating)
+
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "format": "json",   
+        "stream": False,
+        "options": {
+            "temperature": 0.9,
+            "num_predict": 256,
+        },
+    }
+
+    resp = requests.post(
+        "http://localhost:11434/api/generate",
+        json=payload,
+        timeout=300,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    content = data.get("response", "")
+
+    if not isinstance(content, str):
+        content = str(content)
+
+    try:
+        parsed = json.loads(content)
+        title = parsed.get("title", f"Review for {product}")
+        body = parsed.get("body", content)
+    except json.JSONDecodeError:
+        title = f"Review for {product}"
+        body = content
+
+    return Review(
+        persona_id=persona.id,
+        product=product,
+        rating=rating,
+        title=title,
+        body=body,
+        source_model=f"ollama:{model}",
+    )
+
+
+def generate_many_ollama(
+    cfg: Config,
+    n: int,
+    model: str = "hf.co/unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF:Q3_K_S",
+) -> Tuple[List[Review], float]:
+    """
+    Generate n reviews using a local Ollama model, with a progress bar.
+    Returns (reviews, elapsed_seconds).
+    """
+    reviews: List[Review] = []
+    label = f"Ollama ({model})"
+    start_time = time.perf_counter()
+    with typer.progressbar(range(n), label=label) as progress:
+        for _ in progress:
+            reviews.append(generate_review_ollama(cfg, model=model))
+    elapsed = time.perf_counter() - start_time
+    return reviews, elapsed
+
+
+# ---------- REJECTION / REGENERATION LOOP ----------
+
+def _quick_quality_check(review: Review, seen_token_sets: List[set], domain_keywords: set) -> bool:
+    """
+    Lightweight quality check to see if a single review should be accepted.
+    Returns True if acceptable, False if should be rejected.
+    """
+    from .quality import tokenize, jaccard
+    
+    tokens = tokenize(review.body)
+    token_set = set(tokens)
+    total_tokens = len(tokens)
+    
+    # Check 1: too short
+    if total_tokens < 30:
+        return False
+    
+    # Check 2: high overlap with existing reviews
+    if seen_token_sets:
+        max_j = max(jaccard(token_set, prev) for prev in seen_token_sets)
+        if max_j > 0.8:
+            return False
+    
+    # Check 3: low domain realism
+    if domain_keywords:
+        overlap = len(token_set & domain_keywords)
+        realism = overlap / len(domain_keywords)
+        if realism < 0.05:
+            return False
+    
+    # Check 4: rating-text mismatch
+    negative_words = {"bug", "crash", "fail", "broken", "unusable"}
+    if review.rating >= 4 and (token_set & negative_words):
+        return False
+    
+    positive_hype = {"perfect", "flawless", "amazing", "incredible"}
+    if review.rating <= 2 and (token_set & positive_hype):
+        return False
+    
+    return True
+
+
+def generate_many_with_guardrails(
+    cfg: Config,
+    n: int,
+    provider: str,
+    model: str,
+    max_tries_per_sample: int = 3,
+    domain_keywords: Optional[set] = None,
+) -> Tuple[List[Review], float, int]:
+    """
+    Generate n accepted reviews with quality guardrails and auto-regeneration.
+    
+    Args:
+        cfg: Config object
+        n: Number of accepted reviews to generate
+        provider: 'openai', 'ollama', or 'stub'
+        model: Model name/identifier
+        max_tries_per_sample: Max regeneration attempts per sample
+        domain_keywords: Set of domain keywords for realism checks
+    
+    Returns:
+        (reviews, elapsed_seconds, total_attempts)
+    """
+    if domain_keywords is None:
+        domain_keywords = {
+            "api", "endpoint", "request", "response", "debug", "debugging",
+            "auth", "token", "rest", "http", "headers", "payload", "json",
+            "postman", "insomnia", "hoppscotch", "ci", "pipeline", "test", "testing"
+        }
+    
+    # Select generator function
+    if provider == "openai":
+        generator = lambda: generate_review_openai(cfg, model=model)
+    elif provider == "ollama":
+        generator = lambda: generate_review_ollama(cfg, model=model)
+    elif provider == "stub":
+        generator = lambda: generate_review_stub(cfg, source_model="stub")
+    else:
+        raise ValueError(f"Unknown provider: {provider}")
+    
+    accepted_reviews: List[Review] = []
+    seen_token_sets: List[set] = []
+    total_attempts = 0
+    
+    start_time = time.perf_counter()
+    label = f"{provider} (with guardrails)"
+    
+    with typer.progressbar(range(n), label=label) as progress:
+        for _ in progress:
+            tries = 0
+            accepted = False
+            
+            while tries < max_tries_per_sample and not accepted:
+                review = generator()
+                total_attempts += 1
+                tries += 1
+                
+                if _quick_quality_check(review, seen_token_sets, domain_keywords):
+                    accepted_reviews.append(review)
+                    from .quality import tokenize
+                    seen_token_sets.append(set(tokenize(review.body)))
+                    accepted = True
+            
+            # If we exhausted retries, accept the last one anyway to avoid infinite loops
+            if not accepted:
+                accepted_reviews.append(review)
+                from .quality import tokenize
+                seen_token_sets.append(set(tokenize(review.body)))
+    
+    elapsed = time.perf_counter() - start_time
+    return accepted_reviews, elapsed, total_attempts
+

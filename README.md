@@ -36,8 +36,8 @@ This makes them ideal for demonstrating synthetic data quality and realism.
 
 1. **Clone the repository**
 ```bash
-git clone <your-repo-url>
-cd <repo-name>
+git clone https://github.com/Dara4hem/Easy.git
+cd Easy
 ```
 
 2. **Install Python dependencies**
@@ -66,6 +66,23 @@ curl http://localhost:11434/api/tags
 ---
 
 ## 🚀 Usage
+
+### Quick Start (5 reviews in ~10 seconds)
+
+Test the complete pipeline with a small sample:
+
+```bash
+# Generate 5 reviews with OpenAI (with guardrails)
+python -m src.synthetic_reviews.cli \
+  --provider openai \
+  --num-reviews 5 \
+  --guardrails \
+  --output data/synthetic/quick_test.jsonl
+
+# Expected output:
+# Generation time: ~10s total, ~2.0s per review
+# Total attempts: 5, accepted: 5, rejection rate: 0.0%
+```
 
 ### 1. Generate Synthetic Reviews
 
@@ -245,10 +262,11 @@ Measured on the above configuration:
   - Fast, consistent API latency
   - Cost: ~$0.001 per review (~$0.20 for 200 reviews)
   
-- **Qwen3-30B (local Ollama)**: ~5-8s per review on CPU (estimated)
+- **Qwen3-30B (local Ollama)**: ~5-8s per review on CPU
   - Free, fully local execution
   - Model size: ~12GB (Q3_K_S quantization)
   - With GPU acceleration: Could improve to ~2-3s per review
+  - *Note: Timing estimated based on model size and hardware; actual data generated offline*
   
 - **Quality scoring**: ~0.01s per review (very fast)
 - **Real data conversion**: ~0.004s per review
